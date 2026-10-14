@@ -742,25 +742,6 @@ with st.sidebar:
     else:
         st.info("No saved history yet.")
 
-    # System Architecture & Component Status
-    st.divider()
-    st.subheader("System Architecture")
-    backend_live, _ = check_fastapi_backend()
-    if backend_live:
-        st.success("🟢 **FastAPI Backend**: Online (`:8000`)")
-        st.session_state["use_api_route"] = st.toggle(
-            "Route via FastAPI Backend",
-            value=st.session_state.get("use_api_route", False),
-            help="Sends generation requests through http://127.0.0.1:8000/api/generate instead of direct Gemini client"
-        )
-    else:
-        st.info("⚡ **Inference**: Direct Gemini Vision Mode")
-        st.caption("*(Run `uvicorn api.index:app` for REST server)*")
-        st.session_state["use_api_route"] = False
-
-    st.caption("🔬 **Origin Prototypes**: Linked to Tab 2")
-    st.caption("💾 **Database**: Shared `data/` JSON storage")
-
 
 # 9. Initialize Gemini Client & Resilient Retry / Fallback Helper
 
