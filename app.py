@@ -38,6 +38,22 @@ from datetime import datetime, timedelta
 # PIL.Image (Pillow) is used to open, inspect, and convert uploaded images into RGB format
 from PIL import Image
 
+# io converts raw binary bytes into in-memory file streams
+import io
+
+# importlib.util allows dynamic execution of prototype modules from origin/
+import importlib.util
+
+# urllib.request allows checking the health of the local FastAPI backend service
+import urllib.request
+import urllib.error
+
+# requests library for sending multipart requests to the FastAPI backend
+try:
+    import requests
+except ImportError:
+    requests = None
+
 # streamlit (st) is the core web framework that creates our entire user interface, buttons, and cards
 import streamlit as st
 
@@ -173,6 +189,91 @@ def save_json(filepath: str, data):
     # Write formatted JSON data
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# Path to origin directory containing evolutionary prototypes
+ORIGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "origin")
+
+
+# 4b. Origin Prototype & FastAPI REST Backend Bridge Helpers
+
+def check_fastapi_backend(url="http://127.0.0.1:8000"):
+    """
+    Pings the local FastAPI backend service at /api/health or /health to check if uvicorn is running.
+    Returns (is_online: bool, data: dict | None)
+    """
+    for path in ["/api/health", "/health"]:
+        try:
+            req = urllib.request.Request(f"{url}{path}", headers={"User-Agent": "StreamlitClient"})
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
+                if resp.status == 200:
+                    return True, json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            pass
+    return False, None
+
+
+def call_fastapi_generate(api_base_url, image_bytes, filename, platforms_list, tone, context, api_key, token=None):
+    """
+    Sends a multipart POST request to the FastAPI REST backend (/api/generate)
+    to generate captions through the headless backend rather than direct Gemini client.
+    """
+    if requests is None:
+        return False, "Python 'requests' library is not installed."
+    try:
+        files = {"file": (filename, image_bytes, "image/jpeg")}
+        data = {
+            "platforms": ",".join(platforms_list),
+            "tone": tone,
+            "context": context or "",
+            "api_key": api_key or "",
+            "user_token": token or ""
+        }
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = requests.post(f"{api_base_url}/api/generate", files=files, data=data, headers=headers, timeout=60)
+        if resp.status_code == 200:
+            return True, resp.json()
+        return False, f"Backend returned status {resp.status_code}: {resp.text}"
+    except Exception as err:
+        return False, str(err)
+
+
+def load_origin_module(module_name: str, filename: str):
+    """
+    Dynamically loads and returns a Python script module from the origin/ directory.
+    This enables app.py to directly execute prototypes like origin/1_caption_image.py.
+    """
+    file_path = os.path.join(ORIGIN_DIR, filename)
+    if not os.path.exists(file_path):
+        return None, f"File {filename} not found in origin/ directory."
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod, None
+    except Exception as e:
+        return None, str(e)
+    return None, "Failed to load origin module."
+
+
+@st.cache_resource(show_spinner=False)
+def load_blip_from_origin():
+    """
+    Loads and caches Salesforce BLIP weights into memory using origin/1_caption_image.py.
+    """
+    mod, err = load_origin_module("origin_blip", "1_caption_image.py")
+    if err or mod is None:
+        return None, None, err
+    try:
+        if hasattr(mod, "load_model"):
+            processor, model = mod.load_model()
+            return processor, model, None
+        return None, None, "load_model() function not found in origin/1_caption_image.py"
+    except Exception as exc:
+        return None, None, str(exc)
 
 
 # 5. User Authentication & Password Security (PBKDF2 with Random Salts)
@@ -641,6 +742,25 @@ with st.sidebar:
     else:
         st.info("No saved history yet.")
 
+    # System Architecture & Component Status
+    st.divider()
+    st.subheader("System Architecture")
+    backend_live, _ = check_fastapi_backend()
+    if backend_live:
+        st.success("🟢 **FastAPI Backend**: Online (`:8000`)")
+        st.session_state["use_api_route"] = st.toggle(
+            "Route via FastAPI Backend",
+            value=st.session_state.get("use_api_route", False),
+            help="Sends generation requests through http://127.0.0.1:8000/api/generate instead of direct Gemini client"
+        )
+    else:
+        st.info("⚡ **Inference**: Direct Gemini Vision Mode")
+        st.caption("*(Run `uvicorn api.index:app` for REST server)*")
+        st.session_state["use_api_route"] = False
+
+    st.caption("🔬 **Origin Prototypes**: Linked to Tab 2")
+    st.caption("💾 **Database**: Shared `data/` JSON storage")
+
 
 # 9. Initialize Gemini Client & Resilient Retry / Fallback Helper
 
@@ -758,123 +878,164 @@ if not st.session_state.get("current_user") and not st.session_state.get("guest_
     st.stop()
 
 
-# 11. Main Studio Dashboard & Media Uploader
+# 11. Main Studio Dashboard & Multi-Component Architecture
 
-# Header title and instructions
-st.title("Social Media Caption Generator")
-st.write("Upload an image -> get ready-to-post captions for every platform.")
+tab_studio, tab_origin, tab_api = st.tabs([
+    "✨ Social Media Studio",
+    "🔬 Origin Prototype Lab (BLIP Offline)",
+    "🌐 FastAPI REST Backend Bridge"
+])
 
-# Banner displayed when viewing a loaded history record
-active_rec = st.session_state.get("active_record_id")
-current_caps = st.session_state.get("current_captions", {})
-if active_rec and current_caps:
-    col_hist_info, col_hist_reset = st.columns([4, 1])
-    with col_hist_info:
-        st.info(f"📂 **Viewing Saved Record #{active_rec}**: *{st.session_state.get('current_description', '')}*")
-    with col_hist_reset:
-        if st.button("➕ New Upload", use_container_width=True, help="Clear loaded history to upload a new image"):
-            st.session_state["current_captions"] = {}
-            st.session_state["current_description"] = ""
-            st.session_state["active_record_id"] = None
-            st.session_state["liked_captions"] = {}
-            st.rerun()
+with tab_studio:
+    # Header title and instructions
+    st.title("Social Media Caption Generator")
+    st.write("Upload an image -> get ready-to-post captions for every platform.")
 
-# Image file uploader widget supporting JPG, JPEG, PNG, and WEBP formats
-uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
+    # Banner displayed when viewing a loaded history record
+    active_rec = st.session_state.get("active_record_id")
+    current_caps = st.session_state.get("current_captions", {})
+    if active_rec and current_caps:
+        col_hist_info, col_hist_reset = st.columns([4, 1])
+        with col_hist_info:
+            st.info(f"📂 **Viewing Saved Record #{active_rec}**: *{st.session_state.get('current_description', '')}*")
+        with col_hist_reset:
+            if st.button("➕ New Upload", use_container_width=True, help="Clear loaded history to upload a new image"):
+                st.session_state["current_captions"] = {}
+                st.session_state["current_description"] = ""
+                st.session_state["active_record_id"] = None
+                st.session_state["liked_captions"] = {}
+                st.rerun()
 
-# Optional Context Section: text input + compact Voice Input popover
-col_context_label, col_voice_btn = st.columns([3, 1])
-with col_context_label:
-    st.write("**OPTIONAL CONTEXT / CAMPAIGN DETAILS**")
-with col_voice_btn:
-    with st.popover("Voice Input", use_container_width=True):
-        st.caption("Speak your campaign notes or context:")
-        # Native Streamlit audio recorder using browser microphone
-        voice_recording = st.audio_input("Record voice", label_visibility="collapsed")
+    # Image file uploader widget supporting JPG, JPEG, PNG, and WEBP formats
+    uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png", "webp"])
 
-# Text input for optional notes
-extra_context = st.text_input(
-    "Optional context",
-    value="",
-    placeholder="e.g. new product launch, weekend getaway, course completed",
-    label_visibility="collapsed"
-)
+    # Optional Context Section: text input + compact Voice Input popover
+    col_context_label, col_voice_btn = st.columns([3, 1])
+    with col_context_label:
+        st.write("**OPTIONAL CONTEXT / CAMPAIGN DETAILS**")
+    with col_voice_btn:
+        with st.popover("Voice Input", use_container_width=True):
+            st.caption("Speak your campaign notes or context:")
+            # Native Streamlit audio recorder using browser microphone
+            voice_recording = st.audio_input("Record voice", label_visibility="collapsed")
 
-# Show confirmation indicator if voice recording is attached
-if voice_recording is not None:
-    st.caption("Voice recording attached and ready.")
+    # Text input for optional notes
+    extra_context = st.text_input(
+        "Optional context",
+        value="",
+        placeholder="e.g. new product launch, weekend getaway, course completed",
+        label_visibility="collapsed"
+    )
 
-# Open and validate image with Pillow (without rendering preview)
-image_obj = None
-if uploaded_file is not None:
-    try:
-        # Convert image to RGB format to standardize color channels
-        image_obj = Image.open(uploaded_file).convert("RGB")
-        st.success(f"Image successfully uploaded: {uploaded_file.name}")
-    except Exception as err:
-        st.error(f"Error opening image: {err}")
+    # Show confirmation indicator if voice recording is attached
+    if voice_recording is not None:
+        st.caption("Voice recording attached and ready.")
+
+    # Open and validate image with Pillow (without rendering preview)
+    image_obj = None
+    if uploaded_file is not None:
+        try:
+            # Convert image to RGB format to standardize color channels
+            image_obj = Image.open(uploaded_file).convert("RGB")
+            st.success(f"Image successfully uploaded: {uploaded_file.name}")
+        except Exception as err:
+            st.error(f"Error opening image: {err}")
 
 
-# 12. Caption Generation Pipeline (Gemini Multimodal Inference)
+    # 12. Caption Generation Pipeline (FastAPI Routing or Direct Gemini Fallback)
 
-# The "Generate Captions" button is disabled if no image is uploaded or no platforms are selected
-generate_btn_disabled = (image_obj is None) or (len(selected_platforms) == 0)
+    # The "Generate Captions" button is disabled if no image is uploaded or no platforms are selected
+    generate_btn_disabled = (image_obj is None) or (len(selected_platforms) == 0)
 
-if st.button("Generate Captions", type="primary", disabled=generate_btn_disabled):
-    try:
-        # Phase 1: Gemini Vision Scene Understanding
-        with st.spinner("Analyzing image using Gemini Vision..."):
-            # Pass image tensor directly to Gemini to get a factual description
-            image_description = generate_content_with_retry(
-                client=client,
-                contents=[image_obj, "Provide a plain, factual, one-sentence description of this image."],
-                preferred_model=selected_model
-            )
+    if st.button("Generate Captions", type="primary", disabled=generate_btn_disabled):
+        try:
+            routed_via_api = False
 
-        # Store description in session state
-        st.session_state["current_description"] = image_description
-        st.caption(f"Image understood as: *{image_description}*")
+            # Check if user toggled to route through the FastAPI REST backend
+            if st.session_state.get("use_api_route", False):
+                backend_up, _ = check_fastapi_backend()
+                if backend_up and uploaded_file is not None:
+                    with st.spinner("Routing request through FastAPI REST backend (/api/generate)..."):
+                        img_byte_io = io.BytesIO()
+                        image_obj.save(img_byte_io, format="JPEG")
+                        call_ok, call_res = call_fastapi_generate(
+                            api_base_url="http://127.0.0.1:8000",
+                            image_bytes=img_byte_io.getvalue(),
+                            filename=uploaded_file.name,
+                            platforms_list=selected_platforms,
+                            tone=selected_tone,
+                            context=extra_context,
+                            api_key=api_key
+                        )
+                        if call_ok and isinstance(call_res, dict) and "captions" in call_res:
+                            routed_via_api = True
+                            image_description = call_res.get("description", "")
+                            st.session_state["current_description"] = image_description
+                            parsed_caps = {}
+                            for p_key, c_info in call_res["captions"].items():
+                                p_label = c_info.get("label", p_key.capitalize())
+                                parsed_caps[p_label] = c_info.get("caption", "")
+                            st.session_state["current_captions"] = parsed_caps
+                            st.session_state["liked_captions"] = {}
+                            st.success("✅ Captions generated via FastAPI Backend (`POST /api/generate`)!")
+                        else:
+                            st.warning(f"FastAPI request notice ({call_res}). Falling back to direct Gemini client...")
 
-        # Phase 1b: Transcribe Voice Audio if Provided
-        voice_text = ""
-        if voice_recording is not None:
-            try:
-                with st.spinner("Transcribing microphone voice recording..."):
-                    # Get raw audio bytes from the voice recording
-                    audio_bytes = voice_recording.getvalue()
-                    mime_type = voice_recording.type or "audio/wav"
-                    # Create a Gemini audio Part
-                    audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
-                    # Feed audio part to Gemini for speech-to-text transcription
-                    audio_response = client.models.generate_content(
-                        model=selected_model,
-                        contents=[
-                            audio_part,
-                            "Transcribe the spoken speech in this audio clearly into text. Output only the transcription, nothing else."
-                        ]
+            if not routed_via_api:
+                # Direct Gemini Pipeline Execution
+                # Phase 1: Gemini Vision Scene Understanding
+                with st.spinner("Analyzing image using Gemini Vision..."):
+                    # Pass image tensor directly to Gemini to get a factual description
+                    image_description = generate_content_with_retry(
+                        client=client,
+                        contents=[image_obj, "Provide a plain, factual, one-sentence description of this image."],
+                        preferred_model=selected_model
                     )
-                    if audio_response and audio_response.text:
-                        voice_text = audio_response.text.strip()
-                        st.info(f"Voice context recognized: {voice_text}")
-            except Exception as audio_err:
-                st.warning(f"Audio transcription notice: {str(audio_err)}")
 
-        # Merge typed context and transcribed voice context
-        combined_context = extra_context.strip()
-        if voice_text:
-            combined_context = f"{combined_context} {voice_text}".strip() if combined_context else voice_text
+                # Store description in session state
+                st.session_state["current_description"] = image_description
+                st.caption(f"Image understood as: *{image_description}*")
 
-        new_captions = {}
-        progress_bar = st.progress(0)
-        total_p = len(selected_platforms)
+                # Phase 1b: Transcribe Voice Audio if Provided
+                voice_text = ""
+                if voice_recording is not None:
+                    try:
+                        with st.spinner("Transcribing microphone voice recording..."):
+                            # Get raw audio bytes from the voice recording
+                            audio_bytes = voice_recording.getvalue()
+                            mime_type = voice_recording.type or "audio/wav"
+                            # Create a Gemini audio Part
+                            audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+                            # Feed audio part to Gemini for speech-to-text transcription
+                            audio_response = client.models.generate_content(
+                                model=selected_model,
+                                contents=[
+                                    audio_part,
+                                    "Transcribe the spoken speech in this audio clearly into text. Output only the transcription, nothing else."
+                                ]
+                            )
+                            if audio_response and audio_response.text:
+                                voice_text = audio_response.text.strip()
+                                st.info(f"Voice context recognized: {voice_text}")
+                    except Exception as audio_err:
+                        st.warning(f"Audio transcription notice: {str(audio_err)}")
 
-        # Phase 2: Platform-by-Platform Caption Generation
-        for idx, platform_name in enumerate(selected_platforms):
-            rules = PLATFORM_RULES[platform_name]
-            context_line = f"\nAdditional context: {combined_context}\n" if combined_context else ""
+                # Merge typed context and transcribed voice context
+                combined_context = extra_context.strip()
+                if voice_text:
+                    combined_context = f"{combined_context} {voice_text}".strip() if combined_context else voice_text
 
-            # Construct structured copywriting prompt enforcing platform rules and character limits
-            prompt = f"""You are an elite social media copywriter.
+                new_captions = {}
+                progress_bar = st.progress(0)
+                total_p = len(selected_platforms)
+
+                # Phase 2: Platform-by-Platform Caption Generation
+                for idx, platform_name in enumerate(selected_platforms):
+                    rules = PLATFORM_RULES[platform_name]
+                    context_line = f"\nAdditional context: {combined_context}\n" if combined_context else ""
+
+                    # Construct structured copywriting prompt enforcing platform rules and character limits
+                    prompt = f"""You are an elite social media copywriter.
 Media Description: "{image_description}"
 {context_line}
 Platform: {platform_name}
@@ -887,130 +1048,246 @@ Requirements:
 - Structure: Punchy hook, concise body/takeaway, quick call to action, followed by hashtags.
 - Output ONLY the ready-to-post caption text without preambles or markdown code fences.
 """
-            with st.spinner(f"Writing {platform_name} caption..."):
-                caption = generate_content_with_retry(
-                    client=client,
-                    contents=prompt,
-                    preferred_model=selected_model
+                    with st.spinner(f"Writing {platform_name} caption..."):
+                        caption = generate_content_with_retry(
+                            client=client,
+                            contents=prompt,
+                            preferred_model=selected_model
+                        )
+                        new_captions[platform_name] = caption
+
+                    # Update progress bar
+                    progress_bar.progress((idx + 1) / total_p)
+
+                # Save generated captions to session state
+                st.session_state["current_captions"] = new_captions
+                st.session_state["liked_captions"] = {}
+
+                # Phase 3: Automatically Save to JSON History
+                active_u_id = st.session_state["current_user"]["id"] if st.session_state.get("current_user") else 1
+                saved_id = save_captions_to_db(
+                    description=image_description,
+                    media_type="image",
+                    tone=selected_tone,
+                    captions_map=new_captions,
+                    liked_platforms=[],
+                    user_id=active_u_id
                 )
-                new_captions[platform_name] = caption
+                st.session_state["active_record_id"] = saved_id
+                if saved_id:
+                    st.toast(f"Saved to history (Record #{saved_id})")
 
-            # Update progress bar
-            progress_bar.progress((idx + 1) / total_p)
+                st.success("Captions generated successfully.")
 
-        # Save generated captions to session state
-        st.session_state["current_captions"] = new_captions
-        st.session_state["liked_captions"] = {}
-
-        # Phase 3: Automatically Save to JSON History
-        active_u_id = st.session_state["current_user"]["id"] if st.session_state.get("current_user") else 1
-        saved_id = save_captions_to_db(
-            description=image_description,
-            media_type="image",
-            tone=selected_tone,
-            captions_map=new_captions,
-            liked_platforms=[],
-            user_id=active_u_id
-        )
-        st.session_state["active_record_id"] = saved_id
-        if saved_id:
-            st.toast(f"Saved to history (Record #{saved_id})")
-
-        st.success("Captions generated successfully.")
-
-    except Exception as e:
-        st.error(f"Error generating captions: {str(e)}")
+        except Exception as e:
+            st.error(f"Error generating captions: {str(e)}")
 
 
-# 13. Results Cards, Character Limit Meters, Likes & Downloads
+    # 13. Results Cards, Character Limit Meters, Likes & Downloads
 
-current_captions = st.session_state.get("current_captions", {})
-active_desc = st.session_state.get("current_description", "")
-liked_map = st.session_state.get("liked_captions", {})
+    current_captions = st.session_state.get("current_captions", {})
+    active_desc = st.session_state.get("current_description", "")
+    liked_map = st.session_state.get("liked_captions", {})
 
-# If captions exist, render the results grid
-if current_captions:
-    st.divider()
-
-    # Header section: Title, Like All button, and Clear Likes button
-    col_head_title, col_like_all, col_clear_likes = st.columns([3, 1, 1])
-    num_liked = sum(1 for p in current_captions if liked_map.get(p, False))
-
-    with col_head_title:
-        st.subheader(f"Generated Captions ({len(current_captions)} platforms)")
-        liked_summary = f" • ❤️ **{num_liked} of {len(current_captions)} liked**" if num_liked > 0 else ""
-        if active_desc:
-            st.caption(f"Visual Context: *{active_desc}*{liked_summary}")
-        elif liked_summary:
-            st.caption(liked_summary)
-
-    with col_like_all:
-        if st.button("❤️ Like All", use_container_width=True, help="Like all platform captions"):
-            for p in current_captions:
-                st.session_state["liked_captions"][p] = True
-            rec_id = st.session_state.get("active_record_id")
-            if rec_id:
-                update_history_likes(rec_id, list(current_captions.keys()))
-            st.toast("Liked all captions! ❤️")
-            st.rerun()
-
-    with col_clear_likes:
-        if st.button("🤍 Clear Likes", use_container_width=True, help="Clear all likes"):
-            st.session_state["liked_captions"] = {}
-            rec_id = st.session_state.get("active_record_id")
-            if rec_id:
-                update_history_likes(rec_id, [])
-            st.toast("Cleared all likes.")
-            st.rerun()
-
-    # Loop through each platform caption and render its card
-    for platform_name, caption in current_captions.items():
-        rules = PLATFORM_RULES.get(platform_name, {"max_chars": 1000})
-        char_count = len(caption)
-        max_chars = rules["max_chars"]
-        is_liked = liked_map.get(platform_name, False)
-        rec_k = str(st.session_state.get("active_record_id", "gen"))
-
-        # Platform Header with Liked badge
-        col_p_title, col_p_badge = st.columns([4, 1])
-        with col_p_title:
-            st.markdown(f"### {platform_name}")
-        with col_p_badge:
-            if is_liked:
-                st.markdown("❤️ **Liked**")
-
-        # Caption text area (read/copy enabled)
-        st.text_area(
-            f"{platform_name} caption",
-            value=caption,
-            height=140,
-            key=f"text_area_{platform_name}_{rec_k}",
-            label_visibility="collapsed"
-        )
-        # Character count meter proving compliance with limits
-        st.caption(f"Length: {char_count} / {max_chars} characters")
-
-        # Action Buttons: Download .txt file & Toggle Like
-        col_dl, col_like = st.columns([3, 1])
-        with col_dl:
-            st.download_button(
-                label=f"📥 Download {platform_name} Caption",
-                data=caption,
-                file_name=f"{platform_name.lower().replace(' ', '_')}_caption.txt",
-                mime="text/plain",
-                key=f"dl_{platform_name}_{rec_k}",
-                use_container_width=True
-            )
-        with col_like:
-            if is_liked:
-                if st.button("❤️ Liked", key=f"like_{platform_name}_{rec_k}", type="primary", use_container_width=True):
-                    toggle_like(platform_name)
-                    st.toast(f"Unliked {platform_name} caption.")
-                    st.rerun()
-            else:
-                if st.button("🤍 Like", key=f"like_{platform_name}_{rec_k}", type="secondary", use_container_width=True):
-                    toggle_like(platform_name)
-                    st.toast(f"Liked {platform_name} caption! ❤️")
-                    st.rerun()
-
+    # If captions exist, render the results grid
+    if current_captions:
         st.divider()
+
+        # Header section: Title, Like All button, and Clear Likes button
+        col_head_title, col_like_all, col_clear_likes = st.columns([3, 1, 1])
+        num_liked = sum(1 for p in current_captions if liked_map.get(p, False))
+
+        with col_head_title:
+            st.subheader(f"Generated Captions ({len(current_captions)} platforms)")
+            liked_summary = f" • ❤️ **{num_liked} of {len(current_captions)} liked**" if num_liked > 0 else ""
+            if active_desc:
+                st.caption(f"Visual Context: *{active_desc}*{liked_summary}")
+            elif liked_summary:
+                st.caption(liked_summary)
+
+        with col_like_all:
+            if st.button("❤️ Like All", use_container_width=True, help="Like all platform captions"):
+                for p in current_captions:
+                    st.session_state["liked_captions"][p] = True
+                rec_id = st.session_state.get("active_record_id")
+                if rec_id:
+                    update_history_likes(rec_id, list(current_captions.keys()))
+                st.toast("Liked all captions! ❤️")
+                st.rerun()
+
+        with col_clear_likes:
+            if st.button("🤍 Clear Likes", use_container_width=True, help="Clear all likes"):
+                st.session_state["liked_captions"] = {}
+                rec_id = st.session_state.get("active_record_id")
+                if rec_id:
+                    update_history_likes(rec_id, [])
+                st.toast("Cleared all likes.")
+                st.rerun()
+
+        # Loop through each platform caption and render its card
+        for platform_name, caption in current_captions.items():
+            rules = PLATFORM_RULES.get(platform_name, {"max_chars": 1000})
+            char_count = len(caption)
+            max_chars = rules["max_chars"]
+            is_liked = liked_map.get(platform_name, False)
+            rec_k = str(st.session_state.get("active_record_id", "gen"))
+
+            # Platform Header with Liked badge
+            col_p_title, col_p_badge = st.columns([4, 1])
+            with col_p_title:
+                st.markdown(f"### {platform_name}")
+            with col_p_badge:
+                if is_liked:
+                    st.markdown("❤️ **Liked**")
+
+            # Caption text area (read/copy enabled)
+            st.text_area(
+                f"{platform_name} caption",
+                value=caption,
+                height=140,
+                key=f"text_area_{platform_name}_{rec_k}",
+                label_visibility="collapsed"
+            )
+            # Character count meter proving compliance with limits
+            st.caption(f"Length: {char_count} / {max_chars} characters")
+
+            # Action Buttons: Download .txt file & Toggle Like
+            col_dl, col_like = st.columns([3, 1])
+            with col_dl:
+                st.download_button(
+                    label=f"📥 Download {platform_name} Caption",
+                    data=caption,
+                    file_name=f"{platform_name.lower().replace(' ', '_')}_caption.txt",
+                    mime="text/plain",
+                    key=f"dl_{platform_name}_{rec_k}",
+                    use_container_width=True
+                )
+            with col_like:
+                if is_liked:
+                    if st.button("❤️ Liked", key=f"like_{platform_name}_{rec_k}", type="primary", use_container_width=True):
+                        toggle_like(platform_name)
+                        st.toast(f"Unliked {platform_name} caption.")
+                        st.rerun()
+                else:
+                    if st.button("🤍 Like", key=f"like_{platform_name}_{rec_k}", type="secondary", use_container_width=True):
+                        toggle_like(platform_name)
+                        st.toast(f"Liked {platform_name} caption! ❤️")
+                        st.rerun()
+
+            st.divider()
+
+
+# 14. Origin Prototype Lab (BLIP Offline Captioning & Vector Search)
+
+with tab_origin:
+    st.header("🔬 Origin Prototype Lab")
+    st.markdown("""
+    This tab provides a direct interactive bridge to the experimental prototypes located in the `origin/` directory.
+    Before building this production studio, we benchmarked local offline vision models to understand their strengths and limitations.
+    """)
+
+    st.divider()
+    st.subheader("1. Offline BLIP Image Captioning (`origin/1_caption_image.py`)")
+    st.caption("Salesforce BLIP runs locally on your machine (CPU or GPU) using PyTorch and Hugging Face Transformers.")
+
+    col_blip_left, col_blip_right = st.columns([1, 1])
+    sample_files = [f for f in os.listdir(DATA_DIR) if f.endswith(('.jpg', '.jpeg', '.png'))] if os.path.exists(DATA_DIR) else []
+
+    with col_blip_left:
+        blip_img_choice = st.selectbox(
+            "Select a Sample Image from data/",
+            options=["-- Select an image --"] + sample_files,
+            key="origin_sample_choice"
+        )
+        blip_custom_file = st.file_uploader("Or upload your own image for BLIP", type=["jpg", "jpeg", "png"], key="origin_custom_file")
+
+        active_blip_img = None
+        if blip_custom_file:
+            active_blip_img = Image.open(blip_custom_file).convert("RGB")
+            st.image(active_blip_img, caption="Custom Image", use_container_width=True)
+        elif blip_img_choice and blip_img_choice != "-- Select an image --":
+            sample_path = os.path.join(DATA_DIR, blip_img_choice)
+            if os.path.exists(sample_path):
+                active_blip_img = Image.open(sample_path).convert("RGB")
+                st.image(active_blip_img, caption=f"Sample: {blip_img_choice}", use_container_width=True)
+
+    with col_blip_right:
+        st.markdown("#### Run BLIP Inference")
+        st.write("Calls `load_model()` and `generate_caption()` directly from `origin/1_caption_image.py`.")
+
+        btn_blip_disabled = (active_blip_img is None)
+        if st.button("🚀 Run Offline BLIP Model", type="primary", disabled=btn_blip_disabled, key="run_blip_btn"):
+            with st.spinner("Executing origin/1_caption_image.py (Salesforce BLIP)..."):
+                processor, model, err = load_blip_from_origin()
+                if err or processor is None or model is None:
+                    st.warning(f"⚠️ Offline model notice: {err}")
+                    st.info("Salesforce BLIP requires `torch` and `transformers` installed. In cloud environments, the studio uses Google Gemini Vision to conserve RAM.")
+                else:
+                    try:
+                        inputs = processor(active_blip_img, return_tensors="pt")
+                        out = model.generate(**inputs, max_new_tokens=30)
+                        blip_result = processor.decode(out[0], skip_special_tokens=True)
+                        st.success(f"**BLIP Generated Caption**:\n\n*\"{blip_result}\"*")
+                        st.info("💡 **Architectural Difference**: Notice BLIP outputs a single objective fact. In Tab 1, Google Gemini uses this visual understanding to produce tailored copywriting for 7 platforms with custom tones, character limits, and hashtags!")
+                    except Exception as b_err:
+                        st.error(f"BLIP Inference Error: {b_err}")
+
+    st.divider()
+    st.subheader("2. Semantic Vector Search Architecture (`origin/2_build_search_index.py`)")
+    st.markdown("""
+    In `origin/2_build_search_index.py`, we implemented semantic image search using **OpenAI CLIP** and **FAISS (Facebook AI Similarity Search)**:
+    - **Visual Embeddings**: Images are transformed via `CLIPModel.get_image_features()` into 512-dimensional vector coordinates.
+    - **Unit Normalization**: Normalizing vector lengths ensures that inner product equals **Cosine Similarity**.
+    - **FAISS Flat Index**: `faiss.IndexFlatIP(512)` stores the vectors in `data/image_index.faiss` for sub-millisecond retrieval.
+    """)
+
+    idx_path = os.path.join(DATA_DIR, "image_index.faiss")
+    p_path = os.path.join(DATA_DIR, "image_paths.npy")
+    if os.path.exists(idx_path) and os.path.exists(p_path):
+        st.success("✅ **Vector Index Found**: `data/image_index.faiss` is built and indexed on disk.")
+    else:
+        st.info("💡 Build the vector index on your local machine anytime with: `python origin/2_build_search_index.py ./data`")
+
+
+# 15. FastAPI REST Backend Bridge & System Architecture
+
+with tab_api:
+    st.header("🌐 FastAPI REST Backend Bridge")
+    st.markdown("""
+    This tab bridges the Streamlit application with the headless **FastAPI REST server** (`api/index.py`).
+    Both share the exact same user accounts and caption history in `data/`.
+    """)
+
+    col_api_ctrl, col_api_status = st.columns([1, 2])
+    with col_api_ctrl:
+        test_url = st.text_input("FastAPI Server URL", value="http://127.0.0.1:8000", key="test_api_url_input")
+        btn_check = st.button("📡 Ping FastAPI Server", use_container_width=True)
+
+    backend_ok, health_info = check_fastapi_backend(test_url)
+    with col_api_status:
+        if backend_ok:
+            st.success(f"🟢 **FastAPI Server Online**: {health_info.get('service', 'Operational')}")
+            st.json(health_info)
+        else:
+            st.warning("⚪ **FastAPI Server Offline** (Direct Gemini mode active)")
+            st.caption("Start the backend server in a separate terminal: `uvicorn api.index:app --reload --port 8000`")
+
+    st.divider()
+    st.subheader("Live REST API Endpoints (`api/index.py`)")
+    st.markdown("""
+    | Method | Endpoint | Description | Auth Required |
+    | :--- | :--- | :--- | :---: |
+    | `GET` | `/health` | Server probe and liveness check | No |
+    | `POST` | `/api/auth/register` | User signup with PBKDF2 salt & hash | No |
+    | `POST` | `/api/auth/login` | Authenticate credentials & issue 30-day bearer token | No |
+    | `GET` | `/api/auth/me` | Fetch active user profile & caption count | Yes (Bearer Token) |
+    | `POST` | `/api/auth/logout` | Invalidate and purge session token | Yes (Bearer Token) |
+    | `POST` | `/api/generate` | Multimodal caption generation pipeline | Optional (Guest/User) |
+    | `GET` | `/api/history` | Retrieve saved user captions | Yes (Bearer Token) |
+    | `PUT` | `/api/history/{id}/like` | Update per-platform likes/favorites | Yes (Bearer Token) |
+    | `DELETE` | `/api/history/{id}` | Delete a specific saved caption item | Yes (Bearer Token) |
+    """)
+
+    st.divider()
+    st.subheader("Shared Database Bridge Architecture")
+    st.info("🔒 **Data Interoperability**: `app.py` and `api/index.py` share the exact same storage in `data/users.json` and `data/history.json`. A user registered via Streamlit can authenticate through FastAPI `POST /api/auth/login`, and captions generated via REST API appear immediately in the Streamlit history explorer!")
