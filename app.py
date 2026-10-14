@@ -861,10 +861,9 @@ if not st.session_state.get("current_user") and not st.session_state.get("guest_
 
 # 11. Main Studio Dashboard & Multi-Component Architecture
 
-tab_studio, tab_origin, tab_api = st.tabs([
+tab_studio, tab_origin = st.tabs([
     "✨ Social Media Studio",
-    "🔬 Origin Prototype Lab (BLIP Offline)",
-    "🌐 FastAPI REST Backend Bridge"
+    "🔬 Origin Prototype Lab (BLIP Offline)"
 ])
 
 with tab_studio:
@@ -1229,46 +1228,3 @@ with tab_origin:
     else:
         st.info("💡 Build the vector index on your local machine anytime with: `python origin/2_build_search_index.py ./data`")
 
-
-# 15. FastAPI REST Backend Bridge & System Architecture
-
-with tab_api:
-    st.header("🌐 FastAPI REST Backend Bridge")
-    st.markdown("""
-    This tab bridges the Streamlit application with the headless **FastAPI REST server** (`api/index.py`).
-    Both share the exact same user accounts and caption history in `data/`.
-    """)
-
-    col_api_ctrl, col_api_status = st.columns([1, 2])
-    with col_api_ctrl:
-        test_url = st.text_input("FastAPI Server URL", value="http://127.0.0.1:8000", key="test_api_url_input")
-        btn_check = st.button("📡 Ping FastAPI Server", use_container_width=True)
-
-    backend_ok, health_info = check_fastapi_backend(test_url)
-    with col_api_status:
-        if backend_ok:
-            st.success(f"🟢 **FastAPI Server Online**: {health_info.get('service', 'Operational')}")
-            st.json(health_info)
-        else:
-            st.warning("⚪ **FastAPI Server Offline** (Direct Gemini mode active)")
-            st.caption("Start the backend server in a separate terminal: `uvicorn api.index:app --reload --port 8000`")
-
-    st.divider()
-    st.subheader("Live REST API Endpoints (`api/index.py`)")
-    st.markdown("""
-    | Method | Endpoint | Description | Auth Required |
-    | :--- | :--- | :--- | :---: |
-    | `GET` | `/health` | Server probe and liveness check | No |
-    | `POST` | `/api/auth/register` | User signup with PBKDF2 salt & hash | No |
-    | `POST` | `/api/auth/login` | Authenticate credentials & issue 30-day bearer token | No |
-    | `GET` | `/api/auth/me` | Fetch active user profile & caption count | Yes (Bearer Token) |
-    | `POST` | `/api/auth/logout` | Invalidate and purge session token | Yes (Bearer Token) |
-    | `POST` | `/api/generate` | Multimodal caption generation pipeline | Optional (Guest/User) |
-    | `GET` | `/api/history` | Retrieve saved user captions | Yes (Bearer Token) |
-    | `PUT` | `/api/history/{id}/like` | Update per-platform likes/favorites | Yes (Bearer Token) |
-    | `DELETE` | `/api/history/{id}` | Delete a specific saved caption item | Yes (Bearer Token) |
-    """)
-
-    st.divider()
-    st.subheader("Shared Database Bridge Architecture")
-    st.info("🔒 **Data Interoperability**: `app.py` and `api/index.py` share the exact same storage in `data/users.json` and `data/history.json`. A user registered via Streamlit can authenticate through FastAPI `POST /api/auth/login`, and captions generated via REST API appear immediately in the Streamlit history explorer!")
