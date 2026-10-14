@@ -1,0 +1,29 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+
+# Origin prototypes excluded as requested (files 3 to 6)
+origin/3_search_images.py
+origin/4_api_server.py
+origin/5_streamlit_demo.py
+origin/6_social_media_captions.py
+
+# Local runtime data & sessions
+data/users.json
+data/history.json
+data/sessions.json
+data/*.faiss
+data/*.npy
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
